@@ -1,0 +1,151 @@
+---
+- name: Configure secure Linux server
+  hosts: target_server
+  become: yes
+  vars:
+    admin_user: "your_admin"
+    admin_password: "your_password "    # hashed password use 'mkpasswd --method=SHA-512' to generate one 
+    admin_ssh_key: "your_key "
+    ssh_port: 22
+    ssh_permit_root_login: "no"
+    ssh_password_authentication: "no"
+    allowed_ports:
+      - "{{ ssh_port }}"
+      - 80
+      - 443
+
+  tasks:
+    - name: Update APT packages (Debian/Ubuntu)
+      apt:
+        upgrade: dist
+        update_cache: yes
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Update YUM packages (RHEL/CentOS)
+      yum:
+        name: '*'
+        state: latest
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Install essential packages
+      package:
+        name:
+          - vim
+          - curl
+          - fail2ban
+          - auditd
+        state: present
+
+    - name: Create secure admin user
+      user:
+        name: "{{ admin_user }}"
+        password: "{{ admin_password }}"
+        shell: /bin/bash
+        groups: sudo
+        append: yes
+        state: present
+
+    - name: Add SSH key for admin user
+      authorized_key:
+        user: "{{ admin_user }}"
+        key: "{{ admin_ssh_key }}"
+        state: present
+
+    - name: Configure SSH settings
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      loop:
+        - { regexp: '^Port', line: "Port {{ ssh_port }}" }
+        - { regexp: '^PermitRootLogin', line: "PermitRootLogin {{ ssh_permit_root_login }}" }
+        - { regexp: '^PasswordAuthentication', line: "PasswordAuthentication {{ ssh_password_authentication }}" }
+      notify: Restart SSH
+
+    # Debian/Ubuntu: UFW firewall
+    - name: Install UFW
+      package:
+        name: ufw
+        state: present
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Allow necessary UFW ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ allowed_ports }}"
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Enable UFW with default deny
+      ufw:
+        state: enabled
+        policy: deny
+      when: ansible_facts['os_family'] == "Debian"
+
+    # RedHat/CentOS: firewalld
+    - name: Install firewalld
+      package:
+        name: firewalld
+        state: present
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Open firewalld ports
+      firewalld:
+        port: "{{ item }}/tcp"
+        permanent: yes
+        immediate: yes
+        state: enabled
+      loop: "{{ allowed_ports }}"
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Enable and start firewalld
+      service:
+        name: firewalld
+        state: started
+        enabled: yes
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Enable and start Fail2Ban
+      service:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+    - name: Configure Fail2Ban SSH jail
+      copy:
+        content: |
+          [sshd]
+          enabled = true
+          port = {{ ssh_port }}
+          maxretry = 3
+          bantime = 3600
+        dest: /etc/fail2ban/jail.d/sshd.local
+      notify: Restart Fail2Ban
+
+    - name: Enable auditd
+      service:
+        name: auditd
+        state: started
+        enabled: yes
+
+    - name: Remove unnecessary packages
+      package:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - telnet
+        - ftp
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: sshd
+        state: restarted
+
+    - name: Restart Fail2Ban
+      service:
+        name: fail2ban
+        state: restarted
+
